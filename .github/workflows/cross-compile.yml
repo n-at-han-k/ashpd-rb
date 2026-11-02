@@ -47,12 +47,22 @@ jobs:
       fail-fast: false
       matrix:
         platform: ${{ fromJSON(needs.ci-data.outputs.result).supported-ruby-platforms }}
-        # x64-mingw32 is the legacy Windows toolchain used only by Ruby <= 3.0.
-        # We require Ruby >= 3.3, which uses x64-mingw-ucrt (built above), so
-        # rake-compiler never registers a native:x64-mingw32 task and the job
-        # would always fail. Drop it.
+        # Windows is excluded, and not for a toolchain reason: ashpd cannot be
+        # built for it at all. The crate imports `std::os::fd` and
+        # `zbus::zvariant::Fd`, which exist only on Unix, because the portal
+        # interfaces pass file descriptors over D-Bus -- `OpenURI.OpenFile`
+        # takes an fd, not a path. A Windows build fails in the dependency with
+        # 15 errors of the form `unresolved import std::os::fd`, which is
+        # upstream telling us the XDG desktop portals are a Linux desktop
+        # protocol. There is no Windows gem to ship here.
+        #
+        # x64-mingw32 is additionally the legacy toolchain used only by
+        # Ruby <= 3.0; we require >= 3.3, so rake-compiler never registers a
+        # native:x64-mingw32 task and that job would fail regardless.
         exclude:
           - platform: x64-mingw32
+          - platform: x64-mingw-ucrt
+          - platform: aarch64-mingw-ucrt
     steps:
       - uses: actions/checkout@v4
 
