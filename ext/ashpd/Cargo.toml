@@ -1,0 +1,45 @@
+# The package is named ashpd, which RbSys::ExtensionTask requires: it looks the
+# package up by the name the Rakefile gives it, and names the built object after
+# it. So the crate it binds is renamed to ashpd_core on the dependency instead,
+# which is how `use ashpd_core::desktop` refers to it throughout.
+#
+# Without the rename the two would collide: the extern prelude would hold the
+# dependency under the same name as this package.
+[package]
+name = "ashpd"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+name = "ashpd"
+crate-type = ["cdylib"]
+
+[dependencies]
+# magnus 0.9 for the same reasons as vodozemac-rb: 0.7 fails against Ruby 4.0,
+# and 0.9 is what cross-compiles for arm-linux-musl.
+magnus = "0.9"
+
+# ashpd drives every portal call as a future, so the extension owns a runtime
+# and blocks on it. Same shape as oo7-rb, and for the same reason: zbus spawns
+# its own socket reader task, so the runtime has to keep driving background work
+# while a call waits. Hence multi-thread with one worker rather than
+# current-thread.
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "time", "net"] }
+
+# ashpd 0.13, MIT. It speaks the XDG Desktop Portal D-Bus interfaces through
+# zbus directly, so this binding loads no libportal and no libxdp -- the same
+# trade as oo7-rb makes against libsecret.
+#
+# Default features are `tokio`, which is the runtime above.
+#
+# Deliberately not enabled yet, each of which widens the build considerably:
+#   - `gtk4` (= gtk4_x11 + gtk4_wayland) pulls in the gtk4, gdk4x11 and
+#     gdk4wayland crates. It exists to turn a GTK window into a parent handle
+#     for a modal portal dialog, which is what the XdpGtk4 gap needs.
+#   - `pipewire` pulls in libpipewire, needed only to consume a screencast
+#     stream rather than to request one.
+[dependencies.ashpd_core]
+package = "ashpd"
+version = "0.13"
+features = ["location", "file_chooser", "notification", "open_uri", "screenshot", "settings", "trash", "camera", "background", "account"]
