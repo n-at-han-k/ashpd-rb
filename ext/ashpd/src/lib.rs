@@ -8,7 +8,8 @@
 //!
 //! Each portal is a module function or a class method under `Ashpd`, named for
 //! the interface it speaks to: `Ashpd::Screenshot`, `Ashpd::OpenUri`,
-//! `Ashpd::Trash`, `Ashpd::Settings`, `Ashpd::Camera`, `Ashpd::Account`.
+//! `Ashpd::Trash`, `Ashpd::Settings`, `Ashpd::Camera`, `Ashpd::Account`,
+//! `Ashpd::ScreenCast`.
 //!
 //! # Blocking
 //!
@@ -40,20 +41,28 @@ use std::fs::File;
 use std::future::Future;
 use std::sync::OnceLock;
 
-use magnus::{function, prelude::*, Error, RArray, RHash, Ruby};
+use magnus::{function, prelude::*, Error, RArray, RHash, Ruby, TryConvert, Value};
 
 use ashpd_core::desktop::account::UserInformation;
 use ashpd_core::desktop::camera::Camera;
 use ashpd_core::desktop::open_uri::OpenFileRequest;
 use ashpd_core::desktop::screenshot::Screenshot;
-use ashpd_core::desktop::settings::{ColorScheme, Settings};
+use ashpd_core::desktop::screenshot::AvailableTargets;
+use ashpd_core::desktop::settings::{ColorScheme, Contrast, ReducedMotion, Settings};
 use ashpd_core::desktop::trash;
 use ashpd_core::Uri;
 use tokio::runtime::{Builder, Runtime};
 
+mod devices;
+mod files;
+mod screencast;
+mod sessions;
+mod shell;
+mod system;
+
 // --- helpers ---------------------------------------------------------------
 
-fn rt_err<E: std::fmt::Display>(e: E) -> Error {
+pub(crate) fn rt_err<E: std::fmt::Display>(e: E) -> Error {
     // Safe: every caller runs inside a Ruby method invocation (GVL held).
     let ruby = Ruby::get().expect("rt_err called outside the Ruby VM");
     Error::new(ruby.exception_runtime_error(), e.to_string())
@@ -65,7 +74,7 @@ fn rt_err<E: std::fmt::Display>(e: E) -> Error {
 /// task, so the runtime has to keep driving background work while a portal
 /// request waits for the user to answer a dialog. Hence the multi-thread
 /// flavour with one worker, as in oo7-rb.
-fn runtime() -> Result<&'static Runtime, Error> {
+pub(crate) fn runtime() -> Result<&'static Runtime, Error> {
     static RUNTIME: OnceLock<std::io::Result<Runtime>> = OnceLock::new();
 
     RUNTIME
@@ -74,7 +83,7 @@ fn runtime() -> Result<&'static Runtime, Error> {
         .map_err(rt_err)
 }
 
-fn block<F: Future>(future: F) -> Result<F::Output, Error> {
+pub(crate) fn block<F: Future>(future: F) -> Result<F::Output, Error> {
     Ok(runtime()?.block_on(future))
 }
 
@@ -89,6 +98,58 @@ fn color_to(ruby: &Ruby, red: f64, green: f64, blue: f64) -> RArray {
 
 fn uri_from(uri: &str) -> Result<Uri, Error> {
     Uri::parse(uri).map_err(rt_err)
+}
+
+/// Reads an option, as the string it names. Absent and nil read alike, so a
+/// caller can pass a key through without having to decide whether to omit it.
+pub(crate) fn option_name(ruby: &Ruby, options: RHash, key: &str) -> Result<Option<String>, Error> {
+    let Some(value) = options.get(ruby.to_symbol(key)) else {
+        return Ok(None);
+    };
+
+    if value.is_nil() {
+        return Ok(None);
+    }
+
+    Ok(Some(value.to_r_string()?.to_string()?))
+}
+
+pub(crate) fn option_bool(ruby: &Ruby, options: RHash, key: &str) -> Option<bool> {
+    options
+        .get(ruby.to_symbol(key))
+        .filter(|value: &Value| !value.is_nil())
+        .map(|value| value.to_bool())
+}
+
+
+/// Reads an option that is a number, absent and nil alike.
+pub(crate) fn option_number(ruby: &Ruby, options: RHash, key: &str) -> Result<Option<f64>, Error> {
+    let Some(value) = options.get(ruby.to_symbol(key)) else {
+        return Ok(None);
+    };
+
+    if value.is_nil() {
+        return Ok(None);
+    }
+
+    Ok(Some(f64::try_convert(value)?))
+}
+
+/// Reads an option that is a list of strings, empty when absent. Several
+/// portals take one and treat "none given" and "an empty list" alike.
+pub(crate) fn option_strings(ruby: &Ruby, options: RHash, key: &str) -> Result<Vec<String>, Error> {
+    let Some(value) = options.get(ruby.to_symbol(key)) else {
+        return Ok(Vec::new());
+    };
+
+    if value.is_nil() {
+        return Ok(Vec::new());
+    }
+
+    RArray::try_convert(value)?
+        .into_iter()
+        .map(|item| item.to_r_string()?.to_string())
+        .collect()
 }
 
 // --- org.freedesktop.portal.Screenshot -------------------------------------
@@ -169,6 +230,51 @@ fn accent_color(ruby: &Ruby) -> Result<RArray, Error> {
     Ok(color_to(ruby, color.red(), color.green(), color.blue()))
 }
 
+/// Whether the user asked for more contrast, as "no_preference" or "high".
+fn contrast() -> Result<String, Error> {
+    let settings = block(Settings::new())?.map_err(rt_err)?;
+    let contrast = block(settings.contrast())?.map_err(rt_err)?;
+
+    Ok(match contrast {
+        Contrast::NoPreference => "no_preference",
+        Contrast::High => "high",
+    }
+    .to_owned())
+}
+
+/// Whether the user asked for less animation, as "no_preference" or
+/// "reduced_motion". Worth honouring: it is an accessibility setting, not a
+/// taste one.
+fn reduced_motion() -> Result<String, Error> {
+    let settings = block(Settings::new())?.map_err(rt_err)?;
+    let reduced = block(settings.reduced_motion())?.map_err(rt_err)?;
+
+    Ok(match reduced {
+        ReducedMotion::NoPreference => "no_preference",
+        ReducedMotion::ReducedMotion => "reduced_motion",
+    }
+    .to_owned())
+}
+
+/// Which kinds of screenshot this host offers, as `[:screen, :window, :area,
+/// :active_window]` -- what an interactive shot may let the user pick.
+fn available_targets(ruby: &Ruby) -> Result<RArray, Error> {
+    let proxy = block(ashpd_core::desktop::screenshot::ScreenshotProxy::new())?.map_err(rt_err)?;
+    let targets = block(proxy.available_targets())?.map_err(rt_err)?;
+
+    let array = ruby.ary_new();
+    for target in targets.iter() {
+        let _ = array.push(ruby.to_symbol(match target {
+            AvailableTargets::Screen => "screen",
+            AvailableTargets::Window => "window",
+            AvailableTargets::Area => "area",
+            AvailableTargets::ActiveWindow => "active_window",
+        }));
+    }
+
+    Ok(array)
+}
+
 // --- org.freedesktop.portal.Camera -----------------------------------------
 
 /// Whether the host has a camera at all.
@@ -209,6 +315,7 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     let screenshot_module = namespace.define_module("Screenshot")?;
     screenshot_module.define_singleton_method("capture", function!(screenshot, 2))?;
     screenshot_module.define_singleton_method("pick_color", function!(pick_color, 0))?;
+    screenshot_module.define_singleton_method("available_targets", function!(available_targets, 0))?;
 
     let open_uri_module = namespace.define_module("OpenUri")?;
     open_uri_module.define_singleton_method("open", function!(open_uri, 3))?;
@@ -219,12 +326,23 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     let settings_module = namespace.define_module("Settings")?;
     settings_module.define_singleton_method("color_scheme", function!(color_scheme, 0))?;
     settings_module.define_singleton_method("accent_color", function!(accent_color, 0))?;
+    settings_module.define_singleton_method("contrast", function!(contrast, 0))?;
+    settings_module.define_singleton_method("reduced_motion", function!(reduced_motion, 0))?;
 
     let camera_module = namespace.define_module("Camera")?;
     camera_module.define_singleton_method("present?", function!(camera_present, 0))?;
 
     let account_module = namespace.define_module("Account")?;
     account_module.define_singleton_method("user_information", function!(user_information, 1))?;
+
+    // ScreenCast is a session rather than a single call, so it defines a class
+    // of its own and registers itself.
+    screencast::init(ruby, namespace)?;
+    devices::init(namespace)?;
+    files::init(namespace)?;
+    sessions::init(ruby, namespace)?;
+    shell::init(namespace)?;
+    system::init(namespace)?;
 
     Ok(())
 }

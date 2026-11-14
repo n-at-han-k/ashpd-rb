@@ -7,7 +7,7 @@ require "ashpd"
 
 describe Ashpd do
   it "defines every module the crate's init names" do
-    required = [:Screenshot, :OpenUri, :Trash, :Settings, :Camera, :Account]
+    required = [:Screenshot, :OpenUri, :Trash, :Settings, :Camera, :Account, :ScreenCast]
 
     expect(required - Ashpd.constants).to be(:empty?)
   end
@@ -21,6 +21,7 @@ describe Ashpd do
     expect(Ashpd::Settings).to be(:respond_to?, :accent_color)
     expect(Ashpd::Camera).to be(:respond_to?, :present?)
     expect(Ashpd::Account).to be(:respond_to?, :user_information)
+    expect(Ashpd::ScreenCast).to be(:respond_to?, :available_source_types)
   end
 
   # Everything below asserts against the portal's absence rather than its

@@ -27,6 +27,11 @@ magnus = "0.9"
 # current-thread.
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "time", "net"] }
 
+# The session portals deliver their events as async streams, and a Ruby caller
+# wants one event at a time with a timeout rather than a stream. StreamExt is
+# what turns the former into the latter.
+futures-util = { version = "0.3", default-features = false }
+
 # ashpd 0.13, MIT. It speaks the XDG Desktop Portal D-Bus interfaces through
 # zbus directly, so this binding loads no libportal and no libxdp -- the same
 # trade as oo7-rb makes against libsecret.
@@ -38,8 +43,10 @@ tokio = { version = "1", features = ["rt", "rt-multi-thread", "time", "net"] }
 #     gdk4wayland crates. It exists to turn a GTK window into a parent handle
 #     for a modal portal dialog, which is what the XdpGtk4 gap needs.
 #   - `pipewire` pulls in libpipewire, needed only to consume a screencast
-#     stream rather than to request one.
+#     stream rather than to request one. The ScreenCast binding here requests
+#     one and hands the descriptor to the caller, so it stays off: whatever
+#     reads the stream -- GStreamer, usually -- links libpipewire itself.
 [dependencies.ashpd_core]
 package = "ashpd"
 version = "0.13"
-features = ["location", "file_chooser", "notification", "open_uri", "screenshot", "settings", "trash", "camera", "background", "account"]
+features = ["frontend"]

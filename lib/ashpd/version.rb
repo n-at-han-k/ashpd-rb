@@ -4,5 +4,5 @@
 # Copyright, 2026, by General Intelligence Systems.
 
 module Ashpd
-  VERSION = "0.1.1"
+  VERSION = "0.2.0"
 end
